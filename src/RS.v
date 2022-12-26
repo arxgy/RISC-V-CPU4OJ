@@ -1,569 +1,279 @@
-`include "constants.v"
-module RS (
-    input wire clk,  // system clock signal
-    input wire rst,  // reset signal
-    input wire rdy,  // ready signal, pause cpu when low
+module rs(
+    input clk,
+    input rst,
+    input rdy,
+    //input in_decode_get,//Bool, to know whether a instr in coming.
+    input [`INSIDE_OPCODE_WIDTH] in_decode_op,
+    input [`DATA_WIDTH] in_decode_pc,
+    //input [`REG_TAG_WIDTH] in_decode_rs1,//TAG
+    //input [`REG_TAG_WIDTH] in_decode_rs2,//TAG
+    input [`ROB_TAG_WIDTH] in_decode_reorder,//to know whether a instr in coming.(No by reorder == `ZERO_ROB_TAG)
+    input [`DATA_WIDTH] in_decode_imm,
+    //?input in_reg_get_rs1,//Bool, to know if we can get the data from reg(reorder == 0)
+    //input in_reg_wait_rs1,//Bool, reg reorder != 0
+    //?input in_reg_get_rs2,//Bool, to know if we can get the data from reg(reorder == 0)
+    //input in_reg_wait_rs2,//Bool, reg reorder != 0
+    input [`DATA_WIDTH] in_decode_value_rs1,
+    input [`DATA_WIDTH] in_decode_value_rs2,
+    input [`ROB_TAG_WIDTH] in_decode_reorder_rs1,
+    input [`ROB_TAG_WIDTH] in_decode_reorder_rs2,//initial above come from reg,now reg->decode->rs!!!!
+    
+    input in_rob_ready_rs1,//Bool, if we can't get data from reg, then we wait the ROB to commit the data
+    input in_rob_ready_rs2,//Bool, if we can't get data from reg, then we wait the ROB to commit the data
+    input [`DATA_WIDTH] in_rob_value_rs1,
+    input [`DATA_WIDTH] in_rob_value_rs2,
 
-    //Exposed
-    input wire clr,
-    //From Proccessor
+    //When reorder buffer refresh, then we change the value
+    input [`DATA_WIDTH] in_rob_update_value,
+    input [`ROB_TAG_WIDTH] in_rob_update_reorder, //from rs
+    //input [`ROB_TAG_WIDTH] in_rob_update_reorder_from_slb,
+    //input [`DATA_WIDTH] in_rob_update_value_from_slb,//maybe it needn't be deleted(x)
+    /*input [`ROB_TAG_WIDTH] in_reg_update_rs1_reorder,
+    input [`DATA_WIDTH] in_reg_update_rs1_value,
+    input [`ROB_TAG_WIDTH] in_reg_update_rs2_reorder,
+    input [`DATA_WIDTH] in_reg_update_rs2_value,*/
 
-    input wire ready,
-    input wire [`Data_Bus] rd,
-    input wire [`Data_Bus] vj,
-    input wire [`Data_Bus] vk,
-    input wire [`Data_Bus] qj,
-    input wire [`Data_Bus] qk,
-    input wire [16:0] name,
-    input wire [`Data_Bus] Imm,
-    input wire [`ROB_Width] tag,  //position in ROB
+    output out_fetcher_idle,
 
+    input in_rs_misbranch,
 
-    //To ROB
-    output reg ROB_Ready,  //log(RS_Size)=log(16)=4
-    output reg [`ROB_Width] ROB_Addr,
-    output reg [`Data_Bus] ROB_A,
-    output reg [`Data_Bus] ROB_Rd,  //SP:For Load And Store
-    //From ROB
-    input wire [`ROB_Size] ROB_Valid,
-    input wire [511:0] ROB_Value,  //32*ROB_Size-1:0
-    //TO ALU
-    output reg ALU_ready,
-    input wire ALU_success,
-    output reg [`Data_Bus] LV,
-    output reg [`Data_Bus] RV,
-    output reg[3:0]  Op,//Look Into "Constants.v" to see the definition of Operations
-    input wire [`Data_Bus] result,
+    //output for ALU
+    output reg [`INSIDE_OPCODE_WIDTH] out_alu_op, //NOP means no operation
+    output reg [`DATA_WIDTH] out_alu_value_rs1,
+    output reg [`DATA_WIDTH] out_alu_value_rs2,
+    output reg [`DATA_WIDTH] out_alu_imm,
+    output reg [`DATA_WIDTH] out_alu_pc,
+    output reg [`ROB_TAG_WIDTH] out_alu_reorder
 
-    //TO Predictor
-    output reg Train_Ready,
-    output reg Train_Result,
-    output reg [31:0] Train_PC
-
+    //input [`ROB_TAG_WIDTH] in_alu_update_reorder,
+    //input [`DATA_WIDTH] in_alu_update_value
 );
-    reg [`Data_Bus] Vj[`RS_Size];
-    reg [`Data_Bus] Vk[`RS_Size];
-    reg [`Data_Bus] Qj[`RS_Size];
-    reg [`Data_Bus] Qk[`RS_Size];
-    reg [`Data_Bus] A[`RS_Size];
-    reg [16:0] Name[`RS_Size];
-    reg [`ROB_Width] Tag[`RS_Size];
-    reg [`Data_Bus] Rd[`RS_Size];
-    wire [`Data_Bus] Tmp_Value[`ROB_Size];
-    reg Busy[`RS_Size];
-    reg Valid[`RS_Size];
-    genvar i;
-    integer j;
+    reg busy [(`RS_SIZE-1):0]; // to know line in RS has instr which has not been operated.
+    wire [`RS_TAG_WIDTH] free_line; // the place where new instr put. 
+    // reg [`RS_TAG_WIDTH] head;
+    // reg [`RS_TAG_WIDTH] tail;
+    wire ready [(`RS_SIZE-1):0]; // to know whether rs1 and rs2 are ready or not. 
+    wire [`RS_TAG_WIDTH] ready_line;
+    reg [`DATA_WIDTH] pcs [(`RS_SIZE-1):0];
+    reg [`DATA_WIDTH] rs1_value [(`RS_SIZE-1):0];
+    reg [`DATA_WIDTH] rs2_value [(`RS_SIZE-1):0];
+    reg [`ROB_TAG_WIDTH] rs1_reorder [(`RS_SIZE-1):0];
+    reg [`ROB_TAG_WIDTH] rs2_reorder [(`RS_SIZE-1):0];
+    reg [`DATA_WIDTH] imms [(`RS_SIZE-1):0];
+    reg [`INSIDE_OPCODE_WIDTH] ops [(`RS_SIZE-1):0];
+    reg [`ROB_TAG_WIDTH] reorder [(`RS_SIZE-1):0];
+
+    /*reg debug;
+    wire debug_;
+    //assign debug_=rs1_reorder[1];
+    wire [`DATA_WIDTH] debug_wire_pc1;
+    wire [`DATA_WIDTH] debug_wire_pc2;
+    wire [`DATA_WIDTH] debug_wire_pc3;
+    wire [`DATA_WIDTH] debug_wire_pc4;
+    wire [`DATA_WIDTH] debug_wire_pc5;
+    wire [`DATA_WIDTH] debug_wire_pc6;
+    wire [`DATA_WIDTH] debug_wire_pc7;
+    wire [`DATA_WIDTH] debug_wire_pc8;
+    wire [`DATA_WIDTH] debug_wire_pc9;
+    wire [`DATA_WIDTH] debug_wire_pc10;
+    wire [`DATA_WIDTH] debug_wire_pc11;
+    wire [`DATA_WIDTH] debug_wire_pc12;
+    wire [`DATA_WIDTH] debug_wire_pc13;
+    wire [`DATA_WIDTH] debug_wire_pc14;
+    wire [`DATA_WIDTH] debug_wire_pc15;
+    assign debug_wire_pc1 = pcs[1];
+    assign debug_wire_pc2 = pcs[2];
+    assign debug_wire_pc3 = pcs[3];
+    assign debug_wire_pc4 = pcs[4];
+    assign debug_wire_pc5 = pcs[5];
+    assign debug_wire_pc6 = pcs[6];
+    assign debug_wire_pc7 = pcs[7];
+    assign debug_wire_pc8 = pcs[8];
+    assign debug_wire_pc9 = pcs[9];
+    assign debug_wire_pc10 = pcs[10];
+    assign debug_wire_pc11 = pcs[11];
+    assign debug_wire_pc12 = pcs[12];
+    assign debug_wire_pc13 = pcs[13];
+    assign debug_wire_pc14 = pcs[14];
+    assign debug_wire_pc15 = pcs[15];
+
+    wire [`ROB_TAG_WIDTH] debug_rs2_reorder_1;
+    wire [`DATA_WIDTH] debug_rs2_value_1;
+    wire [`ROB_TAG_WIDTH] debug_rs1_reorder_1;
+    wire [`DATA_WIDTH] debug_rs1_value_1;
+
+    assign debug_rs2_reorder_1 = rs2_reorder[1];
+    assign debug_rs1_reorder_1 = rs1_reorder[1];
+    assign debug_rs2_value_1 = rs2_value[1];
+    assign debug_rs1_value_1 = rs1_value[1];
+
+    wire [`ROB_TAG_WIDTH] debug_rs2_reorder_2;
+    wire [`DATA_WIDTH] debug_rs2_value_2;
+    wire [`ROB_TAG_WIDTH] debug_rs1_reorder_2;
+    wire [`DATA_WIDTH] debug_rs1_value_2;
+
+    assign debug_rs2_reorder_2 = rs2_reorder[2];
+    assign debug_rs1_reorder_2 = rs1_reorder[2];
+    assign debug_rs2_value_2 = rs2_value[2];
+    assign debug_rs1_value_2 = rs1_value[2];
+
+    wire [`ROB_TAG_WIDTH] debug_rs2_reorder_5;
+    wire [`DATA_WIDTH] debug_rs2_value_5;
+    wire [`ROB_TAG_WIDTH] debug_rs1_reorder_5;
+    wire [`DATA_WIDTH] debug_rs1_value_5;
+
+    assign debug_rs2_reorder_5 = rs2_reorder[5];
+    assign debug_rs1_reorder_5 = rs1_reorder[5];
+    assign debug_rs2_value_5 = rs2_value[5];
+    assign debug_rs1_value_5 = rs1_value[5];
+
+    wire [`DATA_WIDTH] debug_reorder_5;
+    assign debug_reorder_5 = reorder[5];*/
+    
+    assign out_fetcher_idle = (free_line != `ZERO_RS_TAG);
+    
+    genvar j;
     generate
-        for (i = 0; i < 16; i = i + 1) begin
-            assign Tmp_Value[i] = ROB_Value[(i<<5)+31:i<<5];
+        for (j = 1;j < `RS_SIZE;j = j + 1) begin
+            assign ready[j] = (busy[j] == `TRUE) && (rs1_reorder[j] == `ZERO_ROB_TAG) && (rs2_reorder[j] == `ZERO_ROB_TAG);
         end
     endgenerate
-    initial begin
-        for (j = 0; j < 32; j = j + 1) begin
-            Busy[j]  = `False;
-            Valid[j] = `False;
+
+    assign free_line =  ~busy[1] ? 1 :
+                        ~busy[2] ? 2 :
+                        ~busy[3] ? 3 :
+                        ~busy[4] ? 4 :
+                        ~busy[5] ? 5 :
+                        ~busy[6] ? 6 :
+                        ~busy[7] ? 7 :
+                        ~busy[8] ? 8 :
+                        ~busy[9] ? 9 :
+                        ~busy[10] ? 10 :
+                        ~busy[11] ? 11 :
+                        ~busy[12] ? 12 :
+                        ~busy[13] ? 13 :
+                        ~busy[14] ? 14 :
+                        ~busy[15] ? 15 : `ZERO_RS_TAG;
+
+    assign ready_line = ready[1] ? 1 :
+                        ready[2] ? 2 :
+                        ready[3] ? 3 :
+                        ready[4] ? 4 :
+                        ready[5] ? 5 :
+                        ready[6] ? 6 :
+                        ready[7] ? 7 :
+                        ready[8] ? 8 :
+                        ready[9] ? 9 :
+                        ready[10] ? 10 :
+                        ready[11] ? 11 :
+                        ready[12] ? 12 :
+                        ready[13] ? 13 :
+                        ready[14] ? 14 :
+                        ready[15] ? 15 : `ZERO_RS_TAG;
+
+    integer i;
+  always @(posedge clk) begin
+    if (rst == `TRUE) begin
+        out_alu_op <= `NOP;
+        for (i = 1;i < `RS_SIZE;i = i + 1) begin
+            busy[i] <= `FALSE;
+            ops[i] <= `NOP;
         end
-        Train_Ready = `False;
-        ALU_ready = `False;
-        ROB_Ready = `False;
-        LV = 0;
-        RV = 0;
-        Op = `Add;
-    end
-    integer Log_File;
-    integer clkcycle;
-    `ifdef DEBUG
-    initial begin
-        Log_File = $fopen("RS_LOG.txt", "w");
-        clkcycle = 0;
-    end
-    `endif
-    reg [`RS_Width] Working_RS;
-    wire HasFree;
-    wire HasValid;
-    wire [16:0] Name_RS_TEST = Name[Working_RS];
-    wire [`RS_Width] valid_tag, free_tag;
-    assign free_tag =  ~Busy[0]?0:
-                            ~Busy[1]?1:
-                                ~Busy[2]?2:
-                                    ~Busy[3]?3:
-                                        ~Busy[4]?4:
-                                            ~Busy[5]?5:
-                                                ~Busy[6]?6:
-                                                    ~Busy[7]?7:
-                                                        ~Busy[8]?8:
-                                                            ~Busy[9]?9:
-                                                                ~Busy[10]?10:
-                                                                    ~Busy[11]?11:
-                                                                        ~Busy[12]?12:
-                                                                            ~Busy[13]?13:
-                                                                                ~Busy[14]?14:
-                                                                                    ~Busy[15]?15:
-                                                                                        ~Busy[16]?16:
-                                                                                            ~Busy[17]?17:
-                                                                                                ~Busy[18]?18:
-                                                                                                    ~Busy[19]?19:
-                                                                                                        ~Busy[20]?20:
-                                                                                                            ~Busy[21]?21:
-                                                                                                                ~Busy[22]?22:
-                                                                                                                    ~Busy[23]?23:
-                                                                                                                        ~Busy[24]?24:
-                                                                                                                            ~Busy[25]?25:
-                                                                                                                                ~Busy[26]?26:
-                                                                                                                                    ~Busy[27]?27:
-                                                                                                                                        ~Busy[28]?28:
-                                                                                                                                            ~Busy[29]?29:
-                                                                                                                                                ~Busy[30]?30:
-                                                                                                                                                    ~Busy[31]?31:0;
-    assign valid_tag=  (Valid[0]&Busy[0])?0:
-                            (Valid[1]&Busy[1])?1:
-                                (Valid[2]&Busy[2])?2:
-                                    (Valid[3]&Busy[3])?3:
-                                        (Valid[4]&Busy[4])?4:
-                                            (Valid[5]&Busy[5])?5:
-                                                (Valid[6]&Busy[6])?6:
-                                                    (Valid[7]&Busy[7])?7:
-                                                        (Valid[8]&Busy[8])?8:
-                                                            (Valid[9]&Busy[9])?9:
-                                                                (Valid[10]&Busy[10])?10:
-                                                                    (Valid[11]&Busy[11])?11:
-                                                                        (Valid[12]&Busy[12])?12:
-                                                                            (Valid[13]&Busy[13])?13:
-                                                                                (Valid[14]&Busy[14])?14:
-                                                                                    (Valid[15]&Busy[15])?15:
-                                                                                        (Valid[16]&Busy[16])?16:
-                                                                                            (Valid[17]&Busy[17])?17:
-                                                                                                (Valid[18]&Busy[18])?18:
-                                                                                                    (Valid[19]&Busy[19])?19:
-                                                                                                        (Valid[20]&Busy[20])?20:
-                                                                                                            (Valid[21]&Busy[21])?21:
-                                                                                                                (Valid[22]&Busy[22])?22:
-                                                                                                                    (Valid[23]&Busy[23])?23:
-                                                                                                                        (Valid[24]&Busy[24])?24:
-                                                                                                                            (Valid[25]&Busy[25])?25:
-                                                                                                                                (Valid[26]&Busy[26])?26:
-                                                                                                                                    (Valid[27]&Busy[27])?27:
-                                                                                                                                        (Valid[28]&Busy[28])?28:
-                                                                                                                                            (Valid[29]&Busy[29])?29:
-                                                                                                                                                (Valid[30]&Busy[30])?30:
-                                                                                                                                                    (Valid[31]&Busy[31])?31:0;
-    assign HasFree=1^(Busy[0]
-                        &Busy[1]
-                            &Busy[2]
-                                &Busy[3]
-                                    &Busy[4]
-                                        &Busy[5]
-                                            &Busy[6]
-                                                &Busy[7]
-                                                    &Busy[8]
-                                                        &Busy[9]
-                                                            &Busy[10]
-                                                                &Busy[11]
-                                                                    &Busy[12]
-                                                                        &Busy[13]
-                                                                            &Busy[14]
-                                                                                &Busy[15]
-                                                                                    &Busy[16]
-                                                                                        &Busy[17]
-                                                                                            &Busy[18]
-                                                                                                &Busy[19]
-                                                                                                    &Busy[20]
-                                                                                                        &Busy[21]
-                                                                                                            &Busy[22]
-                                                                                                                &Busy[23]
-                                                                                                                    &Busy[24]
-                                                                                                                        &Busy[25]
-                                                                                                                            &Busy[26]
-                                                                                                                                &Busy[27]
-                                                                                                                                    &Busy[28]
-                                                                                                                                        &Busy[29]
-                                                                                                                                            &Busy[30]
-                                                                                                                                                &Busy[31]);
-    assign HasValid=(Valid[0]&Busy[0])
-                        |(Valid[1]&Busy[1])
-                            |(Valid[2]&Busy[2])
-                                |(Valid[3]&Busy[3])
-                                    |(Valid[4]&Busy[4])
-                                        |(Valid[5]&Busy[5])
-                                            |(Valid[6]&Busy[6])
-                                                |(Valid[7]&Busy[7])
-                                                    |(Valid[8]&Busy[8])
-                                                        |(Valid[9]&Busy[9])
-                                                            |(Valid[10]&Busy[10])
-                                                                |(Valid[11]&Busy[11])
-                                                                    |(Valid[12]&Busy[12])
-                                                                        |(Valid[13]&Busy[13])
-                                                                            |(Valid[14]&Busy[14])
-                                                                                |(Valid[15]&Busy[15])
-                                                                                    |(Valid[16]&Busy[16])
-                                                                                        |(Valid[17]&Busy[17])
-                                                                                            |(Valid[18]&Busy[18])
-                                                                                                |(Valid[19]&Busy[19])
-                                                                                                    |(Valid[20]&Busy[20])
-                                                                                                        |(Valid[21]&Busy[21])
-                                                                                                            |(Valid[22]&Busy[22])
-                                                                                                                |(Valid[23]&Busy[23])
-                                                                                                                    |(Valid[24]&Busy[24])
-                                                                                                                        |(Valid[25]&Busy[25])
-                                                                                                                            |(Valid[26]&Busy[26])
-                                                                                                                                |(Valid[27]&Busy[27])
-                                                                                                                                    |(Valid[28]&Busy[28])
-                                                                                                                                        |(Valid[29]&Busy[29])
-                                                                                                                                            |(Valid[30]&Busy[30])
-                            
-    `ifdef DEBUG                                                                                                                    |(Valid[31]&Busy[31]);
-    always @(posedge clk) begin
-        clkcycle <= clkcycle + 1;
-        $fdisplay(Log_File, "Cycle:%d", clkcycle);
-        for (j = 0; j < 32; j++) begin
-            if (Busy[j]) begin
-                $fdisplay(
-                    Log_File,
-                    "[%d]Valid:%d,Name:%x,Tag:%d,qj:%d,qk:%d,vj:0x%x,vk:0x%x rd:%d A:0x%x",
-                    j, Valid[j], Name[j], Tag[j], Qj[j], Qk[j], Vj[j], Vk[j],
-                    Rd[j], A[j]);
-            end
+        //debug <= busy[1];
+    end else if (rdy == `TRUE) begin
+        out_alu_op <= `NOP;
+        out_alu_reorder <= `ZERO_ROB_TAG;
+        if (in_rs_misbranch == `TRUE) begin
+            for (i = 1;i < `RS_SIZE;i = i + 1) begin
+            busy[i] <= `FALSE;
+            //ops[i] <= `NOP;
+            reorder[i] <= `ZERO_ROB_TAG; //
         end
-    end
-    `endif;
-    
-    always @(posedge clk) begin
-        if (rst) begin
-            for (j = 0; j < 32; j = j + 1) begin
-                Busy[j]  <= `False;
-                Valid[j] <= `False;
-            end
-            Train_Ready <= `False;
-            ALU_ready <= `False;
-            ROB_Ready <= `False;
-            LV <= 0;
-            RV <= 0;
-            Op <= `Add;
-        end
-        if (clr) begin
-            for (j = 0; j < 32; j = j + 1) begin
-                Busy[j]  <= `False;
-                Valid[j] <= `False;
-            end
-            Train_Ready <= `False;
-            ALU_ready <= `False;
-            ROB_Ready <= `False;
-            LV <= 0;
-            RV <= 0;
-            Op <= `Add;
-        end else if (HasValid) begin
-            Working_RS <= valid_tag;
-            ALU_ready <= `True;
-            Valid[valid_tag] <= `False;  //Already Calculated
-            case (Name[valid_tag])
-                `LB, `LH, `LW, `LBU, `LHU, `LWU, `SB, `SH, `SW: begin
-                    LV <= Vj[valid_tag];
-                    RV <= A[valid_tag];
-                    Op <= `Add;
-                    //A[IsValid]<=A[IsValid]+Vj[IsValid];
-                end
-                `LUI: begin                    
-                    LV <= 0;
-                    RV <= A[valid_tag];
-                    Op <= `Add;
-                end
-                `ADD: begin
-                    LV <= Vj[valid_tag];
-                    RV <= Vk[valid_tag];
-                    Op <= `Add;
-                end
-                `ADDI: begin
-                    LV <= Vj[valid_tag];
-                    RV <= A[valid_tag];
-                    Op <= `Add;
-                end
-                `AND: begin
-                    LV <= Vj[valid_tag];
-                    RV <= Vk[valid_tag];
-                    Op <= `And;
-                    //A[IsValid]<=Vj[IsValid]&Vk[IsValid];
-                end
-                `ANDI: begin
-                    LV <= Vj[valid_tag];
-                    RV <= A[valid_tag];
-                    Op <= `And;
-                    //A[IsValid]<=Vj[IsValid]&A[IsValid];
-                end
-                `AUIPC: begin
-                    LV <= Vj[valid_tag];
-                    RV <= {A[valid_tag][31:12], 12'b0};
-                    Op <= `Add;
-                    //A[IsValid]<=Vj[IsValid]+{A[IsValid][31:12], 12'b0};
-                end
-                `BEQ: begin//SP for jumps,A[0] indicates the prediction 1:jump 0:not
-                    LV <= Vj[valid_tag];
-                    RV <= Vk[valid_tag];
-                    Op <= `Equal;
-                    //A[IsValid]<=Rd[IsValid]+{A[IsValid][31:1], 1'b0};
-                end
-                `BGE: begin
-                    LV <= Vj[valid_tag];
-                    RV <= Vk[valid_tag];
-                    Op <= `GEQ_S;
-                    //A[IsValid]<=Rd[IsValid]+{A[IsValid][31:1], 1'b0};
-                end
-                `BGEU: begin
-                    LV <= Vj[valid_tag];
-                    RV <= Vk[valid_tag];
-                    Op <= `GEQ;
-                    //A[IsValid]<=Rd[IsValid]+{A[IsValid][31:1], 1'b0};
-                end
-                `BLT: begin
-                    LV <= $signed(Vj[valid_tag]);
-                    RV <= $signed(Vk[valid_tag]);
-                    Op <= `Less_S;
-                    //A[IsValid]<=Rd[IsValid]+{A[IsValid][31:1], 1'b0};
-                end
-                `BLTU: begin
-                    LV <= Vj[valid_tag];
-                    RV <= Vk[valid_tag];
-                    Op <= `Less;
-                    //A[IsValid]<=Rd[IsValid]+{A[IsValid][31:1], 1'b0};
-                end
-                `BNE: begin
-                    LV <= Vj[valid_tag];
-                    RV <= Vk[valid_tag];
-                    Op <= `NotEqual;
-                    //A[IsValid]<=Rd[IsValid]+{A[IsValid][31:1], 1'b0};
-                end
-                `JAL: begin
-                    LV <= Vk[valid_tag];
-                    RV <= {A[valid_tag][31:1], 1'b0};
-                    Op <= `Add;
-                    //A[IsValid]<=Rd[IsValid]+{A[IsValid][31:1], 1'b0};
-                end
-                `JALR: begin
-                    LV <= Vj[valid_tag];
-                    RV <= A[valid_tag];
-                    Op <= `Add;
-                    //A[IsValid]<=Rd[IsValid]+A[IsValid];
-                end
-                `OR: begin
-                    LV <=Vj[valid_tag];
-                    RV <= Vk[valid_tag];
-                    Op <= `Or;
-                    //A[IsValid]<=Vj[IsValid]|Vk[IsValid];
-                end
-                `ORI: begin
-                    LV <= Vj[valid_tag];
-                    RV <= A[valid_tag];
-                    Op <= `Or;
-                    //A[IsValid]<=Vj[IsValid]|A[IsValid];
-                end
-                `SLL: begin
-                    LV <= Vj[valid_tag];
-                    RV <= Vk[valid_tag];
-                    Op <= `LeftShift;
-                    //A[IsValid]<=Vj[IsValid]<<Vk[IsValid];
-                end
-                `SLLI: begin
-                    LV <= Vj[valid_tag];
-                    RV <= A[valid_tag];
-                    Op <= `LeftShift;
-                    //A[IsValid]<=Vj[IsValid]<<A[IsValid];
-                end
-                `SLT: begin
-                    LV <= Vj[valid_tag];
-                    RV <= Vk[valid_tag];
-                    Op <= `Less_S;
-                end
-                `SLTI: begin
-                    LV <= Vj[valid_tag];
-                    RV <= A[valid_tag];
-                    Op <= `Less_S;
-                end
-                `SLTIU: begin
-                    LV <= Vj[valid_tag];
-                    RV <= A[valid_tag];
-                    Op <= `Less;
-                end
-                `SLTU: begin
-                    LV <= Vj[valid_tag];
-                    RV <= A[valid_tag];
-                    Op <= `Less;
-                end
-                `SRA: begin
-                    LV <= Vj[valid_tag];
-                    RV <= Vk[valid_tag];
-                    Op <= `RightShift_A;
-                end
-                `SRAI: begin
-                    LV <= Vj[valid_tag];
-                    RV <= A[valid_tag];
-                    Op <= `RightShift_A;
-                end
-                `SRL: begin
-                    LV <= Vj[valid_tag];
-                    RV <= Vk[valid_tag];
-                    Op <= `RightShift;
-                end
-                `SRLI: begin
-                    LV <= Vj[valid_tag];
-                    RV <= A[valid_tag];
-                    Op <= `RightShift;
-                end
-                `SUB: begin
-                    LV <= Vj[valid_tag];
-                    RV <= Vk[valid_tag];
-                    Op <= `Minus;
-                end
-                `XOR: begin
-                    LV <= Vj[valid_tag];
-                    RV <= Vk[valid_tag];
-                    Op <= `Xor;
-                end
-                `XORI: begin
-                    LV <= Vj[valid_tag];
-                    RV <= A[valid_tag];
-                    Op <= `Xor;
-                end
-                default:begin
-                    $display("[ALU FATAL]:%d",clkcycle);
-                end
-            endcase
         end else begin
-            ALU_ready <= `False;
-        end
-    end
-    always @(posedge clk) begin
-        if (rst) begin
-
-        end
-        if (clr) begin
-
-        end else if (ALU_success) begin  //COMMIT
-            if (Busy[Working_RS]) begin
-                Busy[Working_RS]  <= `False;
-                Valid[Working_RS] <= `False;
-                //Train Predictor
-                case (Name[Working_RS])
-                    `BEQ, `BNE, `BLT, `BGE, `BLTU, `BGEU: begin
-                        Train_Ready  <= `True;
-                        Train_Result <= result[0];
-                        Train_PC<= Rd[Working_RS]-4;
-                    end
-                    default: begin
-                        Train_Ready <= `False;
-                    end
-                endcase
-                //commit
-                case (Name[Working_RS])
-                    `LB, `LH, `LW, `LBU, `LHU, `LWU: begin
-                        ROB_Ready <= `True;
-                        ROB_Addr <= Tag[Working_RS];
-                        ROB_A <= result;
-                        ROB_Rd <= Rd[Working_RS];
-                    end
-                    `LUI: begin
-                        ROB_Ready <= `True;
-                        ROB_Addr <= Tag[Working_RS];
-                        ROB_A <= result;
-                        ROB_Rd <= Rd[Working_RS];
-                    end
-                    `SB, `SH, `SW: begin
-                        ROB_Ready <= `True;
-                        ROB_Addr <= Tag[Working_RS];
-                        ROB_A <= Vk[Working_RS];
-                        ROB_Rd <= result;
-                    end
-                    `BEQ, `BNE, `BLT, `BGE, `BLTU, `BGEU: begin
-                        ROB_Ready <= `True;
-                        ROB_Addr <= Tag[Working_RS];
-                        ROB_A <= {A[Working_RS][31:1], result[0]};
-                        //$display("[BBB]:%d %x",clkcycle,Rd[Working_RS]);
-                        ROB_Rd <= Rd[Working_RS];
-                    end
-                    `JALR: begin
-                        ROB_A <= result;  //SP
-                        ROB_Ready <= `True;
-                        ROB_Addr <= Tag[Working_RS];
-                        ROB_Rd <= Rd[Working_RS];
-                    end
-                    `JAL: begin
-                        ROB_A <= Vk[Working_RS];  //SP
-                        ROB_Ready <= `True;
-                        ROB_Addr <= Tag[Working_RS];
-                        ROB_Rd <= Rd[Working_RS];
-                    end
-                    default: begin
-                        ROB_Ready <= `True;
-                        ROB_Addr <= Tag[Working_RS];
-                        ROB_A <= result;
-                        ROB_Rd <= Rd[Working_RS];
-                    end
-                endcase
-                //Broadcast
-            end else begin
-                ROB_Ready <= `False;
+            if (ready_line != `ZERO_RS_TAG) begin
+                out_alu_op <= ops[ready_line];
+                out_alu_imm <= imms[ready_line];
+                out_alu_pc <= pcs[ready_line];
+                out_alu_reorder <= reorder[ready_line];
+                out_alu_value_rs1 <= rs1_value[ready_line];
+                out_alu_value_rs2 <= rs2_value[ready_line];
+                busy[ready_line] <= `FALSE;
             end
-        end else begin
-            ROB_Ready <= `False;
-        end
-    end
-    always @(posedge ready) begin  //Introduce new inst into RS
-        if (!HasFree || clr) begin
-        end else begin
-            Vj[free_tag] = vj;
-            Qj[free_tag] = qj;
-            Vk[free_tag] = vk;
-            Qk[free_tag] = qk;
-            A[free_tag] = Imm;
-            Rd[free_tag] = rd;
-            Tag[free_tag] = tag;
-            Name[free_tag] = name;
-            $fdisplay(Log_File, "[Pushing Inst]cycle:%d", clkcycle);
-            $fdisplay(Log_File, "Name:%x Vj:%x Qj:%d Vk:%x Qk:%d Imm:%x", name,
-                      vj, qj, vk, qk, Imm);
-            if (qj != `Empty) begin
-                if (ROB_Valid[qj]) begin
-                    Vj[free_tag] = Tmp_Value[qj];
-                    Qj[free_tag] = `Empty;
+            if (in_decode_reorder != `ZERO_ROB_TAG && free_line != `ZERO_RS_TAG /*&& in_reg_get_rs1 == `TRUE && in_reg_get_rs2 == `TRUE*/) begin
+                busy[free_line] <= `TRUE;
+                //ready[free_line] <= `FALSE;
+                pcs[free_line] <= in_decode_pc;
+                imms[free_line] <= in_decode_imm;
+                ops[free_line] <= in_decode_op;
+                reorder[free_line] <= in_decode_reorder;
+                rs1_value[free_line] <= in_decode_value_rs1;
+                rs2_value[free_line] <= in_decode_value_rs2;
+                rs1_reorder[free_line] <= in_decode_reorder_rs1;
+                rs2_reorder[free_line] <= in_decode_reorder_rs2;
+                if (in_decode_reorder_rs1 != `ZERO_ROB_TAG && in_decode_reorder_rs1 == in_rob_update_reorder) begin
+                    rs1_reorder[free_line] <= `ZERO_ROB_TAG;
+                    rs1_value[free_line] <= in_rob_update_value;
+                end
+                if (in_decode_reorder_rs2 != `ZERO_ROB_TAG && in_decode_reorder_rs2 == in_rob_update_reorder) begin
+                    rs2_reorder[free_line] <= `ZERO_ROB_TAG;
+                    rs2_value[free_line] <= in_rob_update_value;
+                end//!!!!!!!!!
+                /*if (in_decode_reorder_rs1 != `ZERO_ROB_TAG && in_decode_reorder_rs1 == in_rob_update_reorder_from_slb) begin
+                    rs1_reorder[free_line] <= `ZERO_ROB_TAG;
+                    rs1_value[free_line] <= in_rob_update_value_from_slb;
+                end
+                if (in_decode_reorder_rs2 != `ZERO_ROB_TAG && in_decode_reorder_rs2 == in_rob_update_reorder_from_slb) begin
+                    rs2_reorder[free_line] <= `ZERO_ROB_TAG;
+                    rs2_value[free_line] <= in_rob_update_value_from_slb;
+                end//!!!!!!!!!*/
+                /*if (in_decode_reorder_rs1 != `ZERO_ROB_TAG && in_decode_reorder_rs1 == in_reg_update_rs1_reorder) begin
+                    rs1_reorder[free_line] <= `ZERO_ROB_TAG;
+                    rs1_value[free_line] <= in_reg_update_rs1_value;
+                end
+                if (in_decode_reorder_rs2 != `ZERO_ROB_TAG && in_decode_reorder_rs2 == in_reg_update_rs2_reorder) begin
+                    rs2_reorder[free_line] <= `ZERO_ROB_TAG;
+                    rs2_value[free_line] <= in_reg_update_rs2_value;
+                end//!!!!!!!!!*/
+            end
+            if (in_rob_update_reorder != `ZERO_ROB_TAG) begin
+                for (i = 1; i < `RS_SIZE; i = i + 1) begin
+                    if (busy[i] == `TRUE && (rs1_reorder[i] == in_rob_update_reorder)) begin
+                        rs1_reorder[i] <= `ZERO_ROB_TAG;
+                        rs1_value[i] <= in_rob_update_value;
+                    end
+                    if (busy[i] == `TRUE && (rs2_reorder[i] == in_rob_update_reorder)) begin
+                        rs2_reorder[i] <= `ZERO_ROB_TAG;
+                        rs2_value[i] <= in_rob_update_value;
+                    end
                 end
             end
-            if (qk != `Empty) begin
-                if (ROB_Valid[qk]) begin
-                    Vk[free_tag] = Tmp_Value[qk];
-                    Qk[free_tag] = `Empty;
-                end
-            end
-            Valid[free_tag] = `False;
-            Busy[free_tag]  = `True;  //LAST indeed
-        end
-    end
-
-    always @(posedge clk) begin
-        if (clr) begin
-
-        end else begin
-            for (j = 0; j < 32; j++) begin
-                case (Name[j])
-                    default: begin
-                        if (Qj[j] != `Empty) begin
-                            if (ROB_Valid[Qj[j]]) begin
-                                Vj[j] = Tmp_Value[Qj[j]];
-                                Qj[j] = `Empty;
-                            end
-                        end
-                        if (Qk[j] != `Empty) begin
-                            if (ROB_Valid[Qk[j]]) begin
-                                Vk[j] = Tmp_Value[Qk[j]];
-                                Qk[j] = `Empty;
-
-                            end
-                        end
+            if (in_rob_update_reorder != `ZERO_ROB_TAG) begin
+                for (i = 1; i < `RS_SIZE; i = i + 1) begin
+                    if (busy[i] == `TRUE && (rs1_reorder[i] == in_rob_update_reorder)) begin
+                        rs1_reorder[i] <= `ZERO_ROB_TAG;
+                        rs1_value[i] <= in_rob_update_value;
                     end
-                endcase
-                if (Qj[j] == `Empty & Qk[j] == `Empty) begin
-                    Valid[j] = `True;
+                    if (busy[i] == `TRUE && (rs2_reorder[i] == in_rob_update_reorder)) begin
+                        rs2_reorder[i] <= `ZERO_ROB_TAG;
+                        rs2_value[i] <= in_rob_update_value;
+                    end
                 end
             end
+            /*if (in_rob_update_reorder_from_slb != `ZERO_ROB_TAG) begin
+                for (i = 1; i < `RS_SIZE; i = i + 1) begin
+                    if (busy[i] == `TRUE && (rs1_reorder[i] == in_rob_update_reorder_from_slb)) begin
+                        rs1_reorder[i] <= `ZERO_ROB_TAG;
+                        rs1_value[i] <= in_rob_update_value_from_slb;
+                    end
+                    if (busy[i] == `TRUE && (rs2_reorder[i] == in_rob_update_reorder_from_slb)) begin
+                        rs2_reorder[i] <= `ZERO_ROB_TAG;
+                        rs2_value[i] <= in_rob_update_value_from_slb;
+                    end
+                end
+            end*/
         end
+    end else begin
+        // nothing to do when rdy == `FALSE
     end
-    //Make Sure clr is mostly false ;TODO CHECK
+  end
 endmodule

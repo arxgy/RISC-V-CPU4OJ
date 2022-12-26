@@ -1,3 +1,6 @@
+// testbench top module file
+// for simulation only
+
 `timescale 1ns/1ps
 module testbench;
 
@@ -22,8 +25,8 @@ initial begin
   $finish;
 end
 
-// initial begin
-//      #300000000 $finish;
-// end
+initial begin
+     #300000000 $finish;
+end
 
 endmodule
